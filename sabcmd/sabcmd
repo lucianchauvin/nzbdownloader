@@ -1,0 +1,915 @@
+#!/bin/bash
+#===================================================================================
+# This script acts as an api client to SABnzbd.
+# It offers basic operations via the command line,
+# such as adding/removing nzbs.
+#
+# Run the program without arguments to get a list
+# of available commands.
+#
+# @Author:  Matthias Fetzer ( sabcmd [at] rofl.cat )
+# @Version: 1.0
+#
+# @Changelog:
+#             2015-07-26: Initial version                              ( fetzerms )
+#             2015-07-26: Added support for nzo_id and number 
+#		          when deleting queue entries.                 ( fetzerms )
+#             2015-08-06: Added priority support while adding          ( fetzerms )
+#                         NZBs.
+#             2015-08-26: Added support for local files                ( fetzerms )
+#
+#
+#===================================================================================
+
+#set -x # uncomment for debugging.
+
+
+type xmlstarlet >/dev/null 2>&1 || { echo >&2 "SABcmd requires xmlstarlet but it's not installed.  Aborting."; exit 1 ; }
+type curl >/dev/null 2>&1 || { echo >&2 "SABcmd requires curl but it's not installed.  Aborting."; exit 1 ; }
+
+# these variables can be overwritten in the config file, but
+# are set to defaults here. They can be modified to change the
+# appearance.
+sabcmdHeader="+----[ SABcmd ]------------------------------------------------>"
+sabcmdFooter="+-------------------------------------------------------------->"
+sabcmdText="| "
+
+# read config file
+# First try personal config, then system wide, then existing sabnzbd.ini
+if [ -e ~/.sabcmd.conf ]; then
+        source ~/.sabcmd.conf
+elif [ -e /etc/sabcmd.conf ]; then
+        source /etc/sabcmd.conf
+elif [ -e ~/.sabnzbd/sabnzbd.ini ]; then
+	sabUrl="http://localhost:$(awk ' /^port/ { print $NF ; exit }' < ~/.sabnzbd/sabnzbd.ini)"
+	sabApiKey=$(awk ' /^api_key/ { print $NF  }' < ~/.sabnzbd/sabnzbd.ini)
+fi
+
+#= getRawData ======================================================================
+#
+# Function:    getRawData
+# Description: Retrieves the raw xml output of a sabnzbd api invocation.
+#
+# Parameter:   $1 - The mode (see SABnzbd api doc for available modes)
+#              $2 - (optional) Any extra information to be added to the request uri
+#
+# Examples:    getRawData addurl name=$fileUrl&cat=$category
+#
+#===================================================================================
+getRawData(){
+	mode="$1"
+	extra=""
+	if [ ! -z $2 ]; then
+		extra="$2"
+	fi
+	echo "$(curl --silent "$sabUrl/api?mode=$mode&apikey=$sabApiKey&output=xml&$extra")"
+}
+
+#= sabStatus ======================================================================
+#
+# Function:    sabStatus
+# Description: Retrieves the current queue status.
+#
+# Parameter:   $1 - Verbose output flag. Set to true to have more output
+#
+# Examples:    sabStatus false
+#
+#===================================================================================
+sabStatus(){
+
+	long=$1
+	rawData="$( getRawData "queue" )"
+	numNzb="$(echo $rawData | xmlstarlet sel -t -c "count(/queue/slots/slot)")"
+	speed=$(echo $rawData | xmlstarlet sel -t -m '//speed' -v .)
+
+        printHeader
+        printText "Currently enqueued nzbs:"
+	printEmptyLine
+
+	typeset -i i=1
+	while [ "$i" -le "$numNzb" ]; do
+        	nzbName=$(echo $rawData | xmlstarlet sel -t -m "/queue/slots/slot[$i]/filename" -v .)
+                printText "   ( $(printf "%3s" "$i") ) $nzbName"
+
+                # Print long output?
+	        if [ "$long" = true ]; then
+	                sizeLeft=$(echo $rawData | xmlstarlet sel -t -m "/queue/slots/slot[$i]/sizeleft" -v .)
+	                percentage=$(echo $rawData | xmlstarlet sel -t -m "/queue/slots/slot[$i]/percentage" -v .)
+	                timeLeft=$(echo $rawData | xmlstarlet sel -t -m "/queue/slots/slot[$i]/timeleft" -v .)
+			nzoId=$( echo $rawData | xmlstarlet sel -t -m "/queue/slots/slot[$i]/nzo_id" -v . )
+	                printText "$( printf "%62s" "( $nzoId $percentage% done. $sizeLeft left. Eta: $timeLeft )")"
+			printEmptyLine
+	        fi
+	        let i++
+	done
+
+	printEmptyLine
+	printText "Current transfer speed: $speed/s"
+	printFooter
+}
+
+#= sabCount ======================================================================
+#
+# Function:    sabCount
+# Description: Retrieves the current queue count.
+#
+# Examples:    sabCount
+#
+#===================================================================================
+sabCount(){
+	rawData="$( getRawData "queue" )"
+	numNzb="$(echo $rawData | xmlstarlet sel -t -c "count(/queue/slots/slot)")"
+
+	echo $numNzb
+}
+
+#= sabPause ========================================================================
+#
+# Function:    sabPause
+# Description: Pauses the SABnzbd instance.
+#
+# Examples:    sabPause
+#
+#===================================================================================
+sabPause(){
+	rawData="$( getRawData "pause" )"
+	status="$( echo "$rawData" | xmlstarlet sel -t -m "//status" -v . )"
+	
+        printHeader
+	printEmptyLine
+	if [ "$status" = "True" ]; then
+		printText "SABnzbd paused successfully."
+	else
+		printText "SABnzbd pausing failed."
+	fi
+	printEmptyLine
+        printFooter
+}
+
+#= sabResume =======================================================================
+#
+# Function:    sabResume
+# Description: Resumes/Unpauses a paused SABnzbd instance.
+#
+# Examples:    sabResume
+#
+#===================================================================================
+sabResume(){
+        rawData="$( getRawData "resume" )"
+        status="$( echo "$rawData" | xmlstarlet sel -t -m "//status" -v . )"
+
+        printHeader
+	printEmptyLine
+	if [ "$status" = "True" ]; then
+		printText "SABnzbd resumed successfully."
+	else
+		printText "SABnzbd resuming failed."
+	fi
+	printEmptyLine
+        printFooter
+}
+
+#= sabRestart ======================================================================
+#
+# Function:    sabRestart
+# Description: Restarts the SABnzbd instance.
+#
+# Examples:    sabRestart
+#
+#===================================================================================
+sabRestart(){
+        rawData="$( getRawData "restart" )"
+        status="$( echo "$rawData" | xmlstarlet sel -t -m "//status" -v . )"
+
+        printHeader
+	printEmptyLine
+	if [ "$status" = "True" ]; then
+		printText "SABnzbd restart command issued successfully."
+	else
+		printText "SABnzbd issuing restart command failed."
+	fi
+	printEmptyLine
+        printFooter
+}
+
+#= sabAdd ==========================================================================
+#
+# Function:    sabAdd
+# Description: Adds a nzb file to the SABnzbd queue.
+#
+# Parameter:   $1 - The nzb file to add. Either a url or a local filename.
+#              $2 - (optional) The category to add the nzb to.
+#
+# Examples:    sabAdd /tmp/here.is.my.nzb/ubuntu14_04.nzb
+#
+#===================================================================================
+sabAdd(){
+  fileUrl="$1"   # Quote the variables to handle special characters
+  category="$2"
+  priority="$3"
+
+  # Ensure fileUrl is quoted when passed
+  case "$fileUrl" in
+    http* )
+      sabAddUrl "$fileUrl" "$category" "$priority"
+      ;;
+    * )
+      if [ -e "$fileUrl" ]; then
+        sabAddUpload "$fileUrl" "$category" "$priority"
+      else
+        sabAddLocal "$fileUrl" "$category" "$priority"
+      fi
+      ;;
+  esac
+}
+
+#= sabAddUrl ========================================================================
+#
+# Function:    sabAddUrl
+# Description: Adds a nzb file to the SABnzbd instance via an external url.
+#
+# Parameter:   $1 - The nzb file to add. Must be a URL starting with http or https.
+#              $2 - (optional) The category to add the nzb to.
+#
+# Examples:    sabAddUrl http://here.is.my.nzb/ubuntu14_04.nzb
+#
+#===================================================================================
+sabAddUrl(){
+  url="$1"        # Quote the URL to handle special characters
+  category="$2"
+  priority="$3"
+
+  mode="addurl"
+  
+  # URL-encode category and priority (to handle any special characters in these variables)
+  extra="name=$(echo "$url" | jq -sRr @uri)&cat=$(echo "$category" | jq -sRr @uri)&priority=$(echo "$priority" | jq -sRr @uri)"
+  
+  rawData=$(getRawData "$mode" "$extra")
+
+  status="$( echo "$rawData" | xmlstarlet sel -t -m "//status" -v . )"
+
+  printHeader
+  printEmptyLine
+  if [ "$status" = "True" ]; then
+    printText "SABnzbd added url $url successfully."
+  else
+    printText "SABnzbd failed to add url $url."
+  fi
+  printEmptyLine
+  printFooter
+}
+
+
+#= sabAddUpload =====================================================================
+#
+# Function:    sabAddUpload
+# Description: Adds a nzb file to the SABnzbd instance via file upload.
+#
+# Parameter:   $1 - The nzb file to add. Must be a local (existing) file.
+#              $2 - (optional) The category to add the nzb to.
+#
+# Examples:    sabAddUpload /tmp/here.is.my.nzb/ubuntu14_04.nzb
+#
+#===================================================================================
+sabAddUpload(){
+	file="$1"
+	category=$2
+	priority=$3
+
+        printHeader
+	printEmptyLine
+	if [ -e "$file" ]; then
+
+		rawData=$(curl --silent $sabUrl/api -F apikey="$sabApiKey" -F mode=addfile -F output=xml -F "name=@$file" -F "cat=$category" -F "priority=$priority" )
+		status="$( echo "$rawData" | xmlstarlet sel -t -m "//status" -v . )"
+
+        	if [ "$status" = "True" ]; then
+        		printText "SABnzbd added file $file successfully."
+	        else
+        		printText "SABnzbd failed to add file $file."
+        	fi
+	
+	else
+		printText "File $file does not exist."
+	fi
+	printEmptyLine
+        printFooter
+	
+}
+
+#= sabAddLocal =====================================================================
+#
+# Function:    sabAddUrl
+# Description: Adds a nzb file to the SABnzbd instance via an external url.
+#
+# Parameter:   $1 - The nzb file to add. Must be a URL starting with http or https.
+#              $2 - (optional) The category to add the nzb to.
+#
+# Examples:    sabAddUrl http://here.is.my.nzb/ubuntu14_04.nzb
+#
+#===================================================================================
+sabAddLocal(){
+	filePath=$1
+	category=$2
+	priority=$3
+
+	mode="addlocalfile"
+	extra="name=$filePath&cat=$category&priority=$priority"
+
+	rawData=$(getRawData $mode $extra)
+
+        status="$( echo "$rawData" | xmlstarlet sel -t -m "//status" -v . )"
+
+        printHeader
+	printEmptyLine
+	if [ "$status" = "True" ]; then
+		printText "SABnzbd added file $filePath successfully."
+	else
+		printText "SABnzbd failed to add file $filePath."
+	fi
+	printEmptyLine
+        printFooter
+}
+
+#= sabDelete =======================================================================
+#
+# Function:    sabDelete
+# Description: Deletes a nzb file from the SABnzbd queue.
+#
+# Parameter:   $1 - The name/nzo_id/number of the nzb file to be deleted.
+#
+# Examples:    sabDelete ubuntu14_04
+#
+#===================================================================================
+sabDelete(){
+
+        printHeader
+	printEmptyLine
+	case $1 in
+		SABnzbd_nzo_*)
+			# nzo id. Delete this one only
+			sabDeleteNzo $1
+			;;
+		''|*[!0-9]*)
+			# string, means nzb title. Delete all that match.
+			sabDeleteName $1
+			;;
+		*) 
+			# It must be a number.
+			sabDeleteNum $1
+			;;
+	esac
+	printEmptyLine
+	printFooter
+}
+
+#= sabDeleteNzo ====================================================================
+#
+# Function:    sabDeleteNzo
+# Description: Deletes a nzb file from the SABnzbd queue.
+#
+# Parameter:   $1 - nzo_id of the nzb file to be deleted.
+#
+# Examples:    sabDeleteNzo SABnzbd_nzo_wRDhlV
+#
+#===================================================================================
+sabDeleteNzo(){
+        nzbId=$1
+
+	mode="queue"
+	extra="name=delete&value=$nzbId"
+
+
+        if [ ! -z "$nzbId" ]; then
+
+                
+
+                rawStatusData=$( getRawData $mode $extra )
+		status="$( echo "$rawStatusData" | xmlstarlet sel -t -m "//status" -v . )"
+
+		if [ "$status" = "True" ]; then
+			printText "SABnzbd deleted NZB $nzbId successfully."
+		else
+			printText "SABnzbd failed to delete nzb $nzbId."
+		fi	
+        else
+                
+                printText "No nzb found."
+        fi
+}
+
+#= sabDeleteName ===================================================================
+#
+# Function:    sabDeleteName
+# Description: Deletes all nzb files matching the given name.
+#
+# Parameter:   $1 - name of the file to be deleted
+#
+# Examples:    sabDeleteName SABnzbd_nzo_wRDhlV
+#
+#===================================================================================
+sabDeleteName(){
+	nzbName=$1
+	rawQueueData=$( getRawData queue )
+
+	numNzb="$( echo "$rawData" | xmlstarlet sel -t -c "count(/queue/slots/slot[filename='$nzbName'])")"
+
+	typeset -i i=1
+	while [ "$i" -le "$numNzb" ]; do
+		nzbId="$( echo "$rawQueueData" | xmlstarlet sel -t -m "//slot[filename='$nzbName'][$i]/nzo_id"  -v . )"
+        	sabDeleteNzo $nzbId
+                let i++
+	done
+}
+
+#= sabDeleteNum ====================================================================
+#
+# Function:    sabDeleteNum
+# Description: Deletes a nzb file from the SABnzbd queue.
+#
+# Parameter:   $1 - Number of the queued item to delete
+#
+# Examples:    sabDeleteNum 1
+#
+#===================================================================================
+sabDeleteNum(){
+        nzbNum=$1
+        nzbId="$( echo "$rawData" | xmlstarlet sel -t -m "//slot[$nzbNum]/nzo_id"  -v . )"
+
+        sabDeleteNzo $nzbId	
+}
+
+#= sabChangePrio ===================================================================
+#
+# Function:    sabChangePrio
+# Description: Changes the priority of a nzb in the SABnzbd queue.
+#
+# Parameter:   $1 - The name/nzo_id/number of the nzb file to change the priority.
+#              $2 - The new priority to set (numeric)
+#
+# Examples:    sabChangePrio ubuntu14_04 -2
+#
+#===================================================================================
+sabChangePrio(){
+	target=$1
+	priority=$2
+
+        case $target in
+                SABnzbd_nzo_*)
+                        # nzo id. Changee this one only
+                        sabChangePrioNzo $target $priority
+                        ;;
+                ''|*[!0-9]*)
+                        # string, means nzb title. Change all that match.
+                        sabChangePrioName $target $priority
+                        ;;
+                *)
+                        # It must be a number.
+                        sabChangePrioNum $target $priority
+                        ;;
+        esac
+}
+
+#= sabChangePrioNzo ================================================================
+#
+# Function:    sabChangePrioNzo
+# Description: Changes the priority of a nzb in the SABnzbd queue.
+#
+# Parameter:   $1 - The nzo_id of the nzb file to change the priority.
+#              $2 - The new priority to set (numeric)
+#
+# Examples:    sabChangePrioNzo SABnzbd_nzo_wRDhlV -2
+#
+#===================================================================================
+sabChangePrioNzo(){
+	target=$1
+	priority=$2
+
+        mode="queue"
+        extra="name=priority&value=$target&value2=$priority"
+
+        rawStatusData=$( getRawData $mode $extra )
+
+        position="$( echo "$rawStatusData" | xmlstarlet sel -t -m "//position" -v . )"
+
+        if [ -z $position ]; then
+                printText "Changing priority for Nzo $target failed."
+        else 
+                printText "Changed priority for Nzo $target."
+        fi
+}
+
+#= sabChangePrioName ================================================================
+# Function:    sabChangePrioName
+# Description: Changes the priority of a nzb in the SABnzbd queue.
+#
+# Parameter:   $1 - The name of the nzb file to change the priority.
+#              $2 - The new priority to set (numeric)
+#
+# Examples:    sabChangePrioName ubuntu14_04 -2
+#
+#===================================================================================
+sabChangePrioName(){
+	nzbName=$1
+	priority=$2
+
+	rawQueueData=$( getRawData queue )
+
+	numNzb="$( echo "$rawData" | xmlstarlet sel -t -c "count(/queue/slots/slot[filename='$nzbName'])")"
+
+	typeset -i i=1
+	while [ "$i" -le "$numNzb" ]; do
+		nzbId="$( echo "$rawQueueData" | xmlstarlet sel -t -m "//slot[filename='$nzbName'][$i]/nzo_id"  -v . )"
+        	sabChangePrioNzo $nzbId $priority
+                let i++
+	done
+}
+
+#= sabChangePrioNum ================================================================
+# Function:    sabChangePrioNum
+# Description: Changes the priority of a nzb in the SABnzbd queue.
+#
+# Parameter:   $1 - The number of the nzb file to change the priority.
+#              $2 - The new priority to set (numeric)
+#
+# Examples:    sabChangePrioNum 1 -2
+#
+#===================================================================================
+sabChangePrioNum(){
+        nzbNum=$1
+	priority=$2
+
+        nzbId="$( echo "$rawData" | xmlstarlet sel -t -m "//slot[$nzbNum]/nzo_id"  -v . )"
+
+        sabChangePrioNzo $nzbId $priority
+}
+
+#= sabChangeCat ====================================================================
+#
+# Function:    sabChangeCat
+# Description: Changes the category of a nzb in the SABnzbd queue.
+#
+# Parameter:   $1 - The name/nzo_id/number of the nzb file to change the priority.
+#              $2 - The new category to set.
+#
+# Examples:    sabChangeCat ubuntu14_04 test
+#
+#===================================================================================
+sabChangeCat(){
+	target=$1
+	category=$2
+
+        case $target in
+                SABnzbd_nzo_*)
+                        # nzo id. Changee this one only
+                        sabChangeCatNzo $target $category
+                        ;;
+                ''|*[!0-9]*)
+                        # string, means nzb title. Change all that match.
+                        sabChangeCatName $target $category
+                        ;;
+                *)
+                        # It must be a number.
+                        sabChangeCatNum $target $category
+                        ;;
+        esac
+	
+}
+
+#= sabChangeCatNzo =================================================================
+#
+# Function:    sabChangeCatNzo
+# Description: Changes the category of a nzb in the SABnzbd queue.
+#
+# Parameter:   $1 - The nzo_id of the nzb file to change the priority.
+#              $2 - The new category to set.
+#
+# Examples:    sabChangeCatNzo SABnzbd_nzo_wRDhlV test
+#
+#===================================================================================
+sabChangeCatNzo(){
+	target=$1
+	category=$2
+
+        mode="change_cat"
+        extra="value=$target&value2=$category"
+
+        rawStatusData=$( getRawData $mode $extra )
+
+	status="$( echo "$rawStatusData" | xmlstarlet sel -t -m "//status" -v . )"
+	
+	if [ "$status" = "True" ]; then
+		printText "Changed category for $target."
+	else
+		printText "Error: Changing category for $target failed."
+	fi
+}
+
+#= sabChangeCatName ================================================================
+#
+# Function:    sabChangeCatName
+# Description: Changes the category of a all matching nzb in the SABnzbd queue.
+#
+# Parameter:   $1 - The name of the nzb file to change the priority.
+#              $2 - The new category to set.
+#
+# Examples:    sabChangeCatName ubuntu14_04 test
+#
+#===================================================================================
+sabChangeCatName(){
+	nzbName=$1
+	category=$2
+
+	rawQueueData=$( getRawData queue )
+
+	numNzb="$( echo "$rawData" | xmlstarlet sel -t -c "count(/queue/slots/slot[filename='$nzbName'])")"
+
+	typeset -i i=1
+	while [ "$i" -le "$numNzb" ]; do
+		nzbId="$( echo "$rawQueueData" | xmlstarlet sel -t -m "//slot[filename='$nzbName'][$i]/nzo_id"  -v . )"
+        	sabChangeCatNzo $nzbId $category
+                let i++
+	done
+}
+
+#= sabChangeCatNum =================================================================
+#
+# Function:    sabChangeCatNum
+# Description: Changes the category of a nzb in the SABnzbd queue.
+#
+# Parameter:   $1 - The number of the nzb file to change the priority.
+#              $2 - The new category to set.
+#
+# Examples:    sabChangeCatNum 1 test
+#
+#===================================================================================
+sabChangeCatNum(){
+        nzbNum=$1
+	category=$2
+
+        nzbId="$( echo "$rawData" | xmlstarlet sel -t -m "//slot[$nzbNum]/nzo_id"  -v . )"
+
+        sabChangeCatNzo $nzbId $category
+}
+
+#= sabCheck ========================================================================
+#
+# Function:    sabCheck
+# Description: Checks if SABnzbd is running. Prints error and exits otherwise
+#
+#===================================================================================
+sabCheck(){
+	rawData=$( getRawData queue)
+	if [ -z "$rawData" ]; then
+		printHeader
+		printEmptyLine
+		printText "SABnzbd is unreachable. Are you sure SABnzbd is running?"
+		printEmptyLine
+		printFooter
+		exit 1
+	fi
+}
+
+#= printHelp =======================================================================
+#
+# Function:    printHelp
+# Description: Prints the help
+#
+# Examples:    printHelp
+#
+#===================================================================================
+printHelp(){
+
+        echo "Usage: $(basename $0) <command> <parameters>"
+        echo 
+        echo "   Commands:"
+        echo "     - status      : Print queue status"
+        echo "     - long-status : Print queue status (verbose)"
+        echo "     - add         : Adds a nzb to the queue"
+        echo "     - delete      : Deletes a nzb from the queue"
+        echo "     - change      : Changes the priority and/or category of a nzb."
+        echo "     - pause       : Pauses SABnzbd"
+        echo "     - resume      : Resumes a paused SABnzbd"
+        echo "     - restart     : Restarts SABnzbd"
+        echo 
+        echo "   Parameters:"
+        echo "     - --category/-c : The category to add a nzb to."
+        echo "     - --nzb/-n      : Path or url to the nzb file to add."
+	echo "     - --priority/-p : The priority for the nzb."
+        echo "                       Possible values: low, normal, high and force."
+        echo "     - --target/-t   : The queue target to operate on."
+        echo "                       Can be: nzo_id, nzb-name or number"
+        echo
+        echo "                       Caution: When passing a nzb-name, the operations"
+        echo "                                will affect all matching queue entries."
+        echo
+        echo
+        echo "   Examples:"
+        echo "     - $(basename $0) status"
+        echo "     - $(basename $0) add --nzb http://here.is.my.nzb/ubuntu14_04.nzb"
+        echo "     - $(basename $0) add --nzb /tmp/here.is.my.nzb/ubuntu14_04.nzb"
+        echo "     - $(basename $0) change --target ubuntu14_04 --category test"
+        echo "     - $(basename $0) change --target ubuntu14_04 --priority high"
+        echo "     - $(basename $0) delete --target ubuntu14_04"
+        echo "     - $(basename $0) delete --target SABnzbd_nzo_wRDhlV"       
+        echo "     - $(basename $0) delete --target 2"
+        echo 
+        exit 1
+}
+
+
+# helper to print to stderr
+printError(){
+        echo "$@" 1>&2
+}
+
+# helper to print sabcmd header
+printHeader(){
+        echo -e "$sabcmdHeader"
+}
+
+# helper to print sabcmd footer
+printFooter(){
+	echo -e "$sabcmdFooter"
+}
+
+# helper to print text between header and footer.
+printText(){
+        while IFS= read -r line; do
+                echo "$sabcmdText$line"
+        done <<< "$@"
+}
+
+# helper to print an empty line.
+printEmptyLine(){
+        printText
+}
+
+
+if [ -z $sabUrl ] || [ -z $sabApiKey ]; then
+        printHeader
+        printEmptyLine        
+        printText "sabUrl or sabApiKey are not set. Please create or edit"
+        printText "/etc/sabcmd.conf or ~/.sabcmd.conf. Please refer to"
+        printText "sabcmd.conf.sample for more information."
+        printEmptyLine
+        printFooter
+        exit 1
+fi
+
+# get the current command and shift the args.
+command=$1
+shift
+OIFS=$IFS
+IFS=$'\n'
+
+# Argument parsing
+while [[ $# > 1 ]]; do
+
+	key="$1"
+
+	case $key in
+		-c|--category)
+			category="$2"
+			shift
+			;;
+
+		-n|--nzb)
+			nzb="$2"
+	 		shift
+			;;
+
+		-t|--target)
+			target="$2"
+			shift
+			;;
+		-p|--priority)
+			priority="$2"
+
+                        # Convert priorities to their matching numbers
+			case $priority in
+				paused)
+					priority="-2"
+					;;
+				low)
+					priority="-1"
+					;;
+				
+				normal)
+					priority="0"
+					;;
+
+				high)
+					priority="1"
+					;;
+
+				force)
+					priority="2"
+					;;
+
+			esac
+			shift
+			;;
+		*)
+			shift # ignore unknown option.
+		;;
+	esac
+done	
+shift
+
+sabCheck
+
+# switch over the available commands
+case $command in
+	status )
+		# print status, short
+		sabStatus false
+		;;
+
+	long-status )
+		# print status, long
+		sabStatus true
+		;;
+
+	count )
+		#print count
+		sabCount
+		;;
+
+	add )
+		# add nzb. Either file or url.
+		if [ -z $nzb ]; then
+			echo "Error: Add command requires a nzb."
+		else
+
+                        # set default values. For newly added nzb files.
+                        if [ -z $category ]; then
+	                        category="Default"
+                        fi
+
+                        if [ -z $priority ]; then
+	                        priority="-100"
+                        fi
+
+			sabAdd $nzb $category $priority
+		fi
+		;;
+
+	delete )
+		# delete nzb
+		if [ -z "$target" ]; then
+			echo "Error: Delete command requires a target."
+		else
+			sabDelete $target
+		fi
+		;;
+
+	pause )
+		# pause sabnzbd
+		sabPause
+		;;
+
+	resume )
+		# resume sabnzbd
+		sabResume
+		;;
+
+	restart )
+		# restart sabnzbd
+		sabRestart
+		;;
+
+	change )
+		# change priority and/or category
+                if [ -z $category ] && [ -z $priority ]; then
+                        echo "Error: Change command requires either priority or category (or both)"
+                elif [ -z $target ]; then
+			echo "Error: Change command requires a target."
+		else
+        
+
+			printHeader
+		        printEmptyLine
+
+        	        # process category change
+	                if [ ! -z $category ]; then
+        			sabChangeCat $target $category
+	                fi
+
+                	# process priority change
+        	        if [ ! -z $priority ]; then
+	        		sabChangePrio $target $priority
+	                fi
+
+        		printEmptyLine
+		        printFooter
+		fi
+		;;
+	* )
+		# print the help
+		printHelp
+		;;
+esac	
+
+IFS=$OIFS
+exit 0
